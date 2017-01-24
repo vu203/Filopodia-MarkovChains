@@ -1,0 +1,561 @@
+---
+title: "Markov Chains"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+### Summary 
+
+This document explains the use of discrete-time Markov chains to assess whether two quantities changing over time are independent or not. We used the method here to study the accumulation of a fluorescent protein within the tips of protrusions (filopodia) of neuronal growth cones, and the dynamic behaviour (extension or retraction) of these tips. The analysis documented here makes use of the R package 'markovchain' (developed by Giorgio Alfredo Spedicato, Tae Seung Kang, Sai Bhargav Yalamanchi, Mildenberger Thoralf and Deepak Yadav; <https://CRAN.R-project.org/package=markovchain>).
+
+The question to be answered is: does the level of fluorescence of TOCA within filopodial tips at a given timepoint affect their likelihood to grow or shrink? Available data describes TOCA fluorescence levels within tips over time (up to 121 timepoints) for 21 filopodia, and corresponding tip extension/retraction rates. Both quantities exhibit auto-correlated behaviour within a time series. Therefore it is not possible to use statistical tools that assume independence of measurements; however, they can be modelled as discrete time Markov chains. **The null hypothesis to be tested is: 'TOCA fluorescence and tip movement are fully independent of each other'**.
+
+In the first section ('A worked example') we develop and demonstrate this approach on one example filopodium. The second section ('Application to the dataset') demonstrates the application of this method to a complete dataset of 21 filopodia.
+
+### Required data and packages: 
+
+Dataset: <http://link-to-data-here> (data not publicly available yet).
+  
+```{r}
+load('~/Documents/Postdoc/ANALYSIS_local-files/ANALYSIS LOGS/2016-11_CCFs_Improvements/LastWorkspace_CCF_TOCA.Rdata')
+```
+
+Installing and importing the required R package:
+
+```{r}
+#install.packages('markovchain', dependencies=TRUE, repos='http://cran.rstudio.com/')
+library(markovchain)
+```
+
+### Introduction to the data: 
+
+Data for all filopodia are stored in the workspace as variables called 'all.move' (tip movement) and 'tip.f' (tip fluorescence). 
+
+Showing data for the chosen example filopodium:
+
+```{r, echo = FALSE, fig.height=3, fig.width=5}
+#Extracting movement and fluorescence data for an example filopodium:
+move.0 <- all.move[, 1]
+tip.f.0   <- tip.f[, 1]
+
+head(data.frame("Time in s" = dS.vector, "Movement" = move.0, "Fluorescence" = tip.f.0))
+
+# Colors for plotting:
+cols <- c('#00CC00', '#33333390', '#33333310')
+
+#  par(din = c(5,3))
+#  par(mfrow = c(1,2))
+	par(mar = c(4,4,1,4) + 0.1)
+	
+matplot((2*1:121), (all.move[, 1])/2,
+	type = "l",
+	lwd = 2,
+	col = cols[2],
+#	ylim = c(ylo, yhi),
+	ylim = c(-0.32, 0.32)/2,
+	xlab = "Time [s]",
+	ylab = expression("Tip movement [" * mu * "m / s]")
+	)
+abline(h = 0, lty = 3)	
+par(new = TRUE)
+matplot(2*1:121, tip.f[, 1], 
+	col = cols[1],
+	lwd = 2,
+	type="l", ann=FALSE, yaxt="n",
+#	ylim = c(ylo2, yhi2))
+	ylim = c(0.7, 1.3))	
+axis(4)
+mtext(expression ("Tip Fluorescence"), side=4,line=3, col = cols[1])
+```
+
+\n
+
+**Fig. 1. Measured TOCA tip fluorescence and tip movement for an example filopodium from our dataset.**
+
+Fluorescence and movement for the example filopodium appear to be positively correlated: 
+
+```{r, echo = FALSE, fig.height=3, fig.width=5}
+#dev.new(width = 10, height = 3)
+#par(din = c(5,3))
+	par(mar = c(4,4,1,4) + 0.1)
+matplot(tip.f.0, move.0,
+	 pch = 16,
+	 cex = 1,
+	 col = "#00CC0050",
+	# ylim = c(0, 10),
+    # xlim = c(0, 10),
+    xlab = "Observed tip fluorescence",
+    ylab = "Observed tip movement"
+	 )
+orig.rho <- cor.test(as.numeric(move.0), as.numeric(tip.f.0), method = "spearman")$estimate
+legend("topright", paste("Spearman Rho =", signif(orig.rho, 2)), bty = "n")
+
+```
+
+\n
+
+**Fig. 2. Relationship between measured TOCA tip fluorescence and tip movement for the example filopodium in Fig.1.**
+
+
+Is this correlation above what can be expected to occur at random in two unrelated time series? Time series that are autocorrelated may be liable to producing spurious correlations that are not truly meaningful. If that is the case, we would expect the same extent of correlation to also occur in simulated datasets modelled to fit the same 'rules' (i.e. transition probabilities between states). In other words, if the null hypothesis is true and the two time series are independent of each other, modelling the two processes as independent Markov chains is likely to recapitulate at least in a significant proportion of simulated cases.
+
+An assessment of this hypothesis on the given example is provided in the following section.
+
+
+### Implementing the Markov chains approach: A worked example
+
+For implementing the Markov chain approach, the data given above first need to be discretised (binned):
+
+```{r}
+states.move <- 1:9
+states.tip.f <- 1:9
+move.0d <- cut(move.0, 9, labels = states.move, na.omit = TRUE)  # 'd' for discrete
+move.0d
+tip.0d <- cut(tip.f.0, 9, labels = states.tip.f, na.omit = TRUE)
+tip.0d
+```
+
+The following table shows the intervals according to which the data is assigned to bin number ("category", or "state" in Markov chain terminology):
+
+```{r, echo=FALSE}
+data.frame("Movement" = levels(cut(tip.f.0, 9)), "Category" = 1:9)
+```
+
+\n
+
+**Table 1. Intervals describing the tip movement states for the example filopodium.**
+
+<!-- The behaviour of the filopodium visualised, using bins specified as above: -->
+
+<!-- ```{r, echo = FALSE, fig.height = 3, fig.width=5} -->
+<!-- 	par(mar = c(4,4,1,4) + 0.1) -->
+
+<!-- matplot((2*1:121), move.0d, -->
+<!-- 	type = "l", -->
+<!-- 	lwd = 2, -->
+<!-- 	col = cols[2], -->
+<!-- #	ylim = c(ylo, yhi), -->
+<!-- 	ylim = c(0, 10), -->
+<!-- 	xlab = "Time [s]", -->
+<!-- 	ylab = expression("Tip movement [bin no.]") -->
+<!-- 	) -->
+<!-- matplot(2*1:121, tip.0d, -->
+<!-- 	col = cols[1], -->
+<!-- 	lwd = 2, -->
+<!-- 	type="l", -->
+<!-- 	add = TRUE, -->
+<!-- 	ylim = c(0, 10) -->
+<!-- ) -->
+<!-- mtext(expression ("Tip fluorescence [bin no.]"), side=4,line=2, col = cols[1]) -->
+
+<!-- matplot(tip.0d, move.0d, -->
+<!-- 	 pch = 15, -->
+<!-- 	 cex = 2.5, -->
+<!-- 	 col = "#00CC0025", -->
+<!-- 	 ylim = c(0, 10), -->
+<!--     xlim = c(0, 10), -->
+<!--     xlab = "Observed tip fluorescence", -->
+<!--     ylab = "Observed tip movement" -->
+<!-- 	 ) -->
+<!-- ``` -->
+
+*Assuming the null hypothesis is true,* we describe the fluorescence and movement as separate, completely independent discrete time Markov chains (using functions provided by the *'markovchain'* package). 
+
+We first need to **calculate transition probabilities** between states for the each of the two time series: 
+
+```{r}
+tMatrixMove <-  markovchainFit(move.0d)$estimate@transitionMatrix
+tMatrixTipF     <- markovchainFit(tip.0d)$estimate@transitionMatrix
+
+print(tMatrixMove)
+
+# Now use these transition matrices to generate Markov chain objects
+
+mcMove <- new("markovchain", 
+	states = as.character(colnames(tMatrixMove)), 
+	byrow = TRUE, 
+	transitionMatrix = tMatrixMove,
+	name = "Movement")
+
+mcTip <- new("markovchain", 
+	states = as.character(colnames(tMatrixTipF)), 
+	byrow = TRUE, 
+	transitionMatrix = tMatrixTipF,
+	name = "Fluorescence")
+
+```
+
+<!-- \n -->
+<!-- **Fig. 3. Transition probabilities between various states of tip movement (see Table 1) Relationship between measured TOCA tip fluorescence and tip movement for the example filopodium in Fig.1.** -->
+
+
+Having calculated Markov chain transition probabilities for movement and fluorescence of the given filopodium, we can **generate Markov chain simulations** that follow the same transition probabilities. Here is an example of a single pair of simulated time series created in this way:
+
+```{r}
+move.sim1 <- as.integer(rmarkovchain(121, object = mcMove, t0 = move.0d[3]))
+move.sim1
+tip.sim1 <- as.integer(rmarkovchain(121, object = mcTip, t0 = tip.0d[1]))
+tip.sim1
+```
+
+Illustrating this visually:
+
+```{r, echo = FALSE, warning = FALSE, fig.width=5, fig.height=3}
+
+par(mar = c(4,4,1,4) + 0.1)
+
+matplot((2*1:121), move.sim1,
+	type = "l",
+	lwd = 2,
+	col = cols[2],
+#	ylim = c(ylo, yhi),
+	ylim = c(0, 10),
+	xlab = "Time [s]",
+	ylab = expression("Tip movement [bin no.]"),
+	)
+matplot(2*1:121, tip.sim1,
+	col = cols[1],
+	lwd = 2,
+	type="l",
+	add = TRUE,
+	ylim = c(0, 10)
+)
+mtext(expression ("Tip Fluorescence [bin no.]"), side=4,line=2, col = cols[1])
+
+par(mar = c(4,4,1,4) + 0.1)
+matplot(tip.sim1, move.sim1,
+	 pch = 15,
+	 cex = 2.5,
+	 col = "#00CC0025",
+	 ylim = c(0, 10),
+    xlim = c(0, 10),
+    xlab = "Simulated tip fluorescence",
+    ylab = "Simulated tip movement"
+	 )
+
+sim.rho <- cor.test(as.numeric(move.sim1), as.numeric(tip.sim1), method = "spearman")$estimate
+legend("topright", paste("Spearman Rho =", signif(sim.rho, 2)), bty = "n")
+```
+
+\n
+
+**Fig. 3. Fluorescence and movement values over time (upper panel) and in relation to each other (lower panel) in one instance of a Markov chain simulation.** The simulation is based on transition probabilities found in real data for the single example filopodium. The two time series are assumed to be independent of each other.
+
+
+**Now, the question is: if we generate a large number of such simulations, in what proportion of the simulations do we observe the extent of correlation that matches the correlation in the real (observed) dataset?** To answer this question, we create 10,000 simulated objects here (all based on transition probabilities from the real dataset), and record the correlation coefficient of each. With this we can make a rough estimate the likelihood of the correlation observed in the real-world dataset having occured by chance.
+
+
+
+```{r, warning = FALSE, cache = TRUE}
+# Number of simulations per filopodium
+n.sim.per.filo <- 10000
+set.seed <- 0.1
+
+# Creating the variables used in loop below: 
+sim.rho <- c()
+sim.p <- c()
+sim.move <- data.frame(matrix(NA, ncol = n.sim.per.filo, nrow = length(move.0d)-bb))
+sim.tip  <- data.frame(matrix(NA, ncol = n.sim.per.filo, nrow = length(tip.0d)-bb))
+
+# Correlation in the original (observed) dataset:
+rho.0 <- cor.test(as.numeric(move.0d), as.numeric(tip.0d))$estimate
+p.0 <- cor.test(as.numeric(move.0d), as.numeric(tip.0d))$p.value
+
+# Loop to run through 10,000 simulations for the same filopodium:
+for (i in 1:n.sim.per.filo) {
+	
+	move.sim.i <- as.integer(rmarkovchain(121, object = mcMove, t0 = move.0d[3]))
+	tip.sim.i <- as.integer(rmarkovchain(121, object = mcTip, t0 = tip.0d[1]))
+	
+	sim.move[, i] <- move.sim.i
+	sim.tip[, i] <- tip.sim.i	
+	
+	# Record the correlation for each simulation (at each iteration of the loop):
+	p.i <- cor.test(as.numeric(move.sim.i), as.numeric(tip.sim.i), method = "spearman")$p.value
+	rho.i <- cor.test(as.numeric(move.sim.i), as.numeric(tip.sim.i), method = "spearman")$estimate
+
+	sim.p[i] <- p.i 
+	sim.rho[i] <- rho.i 
+}
+```
+
+Which of these simulations has the best correlation between fluorescence and movement?
+```{r}
+sim.max <- which.max(sim.rho)
+print(sim.max)
+```
+
+Visualise the most positively correlated simulation:
+
+```{r, echo = FALSE, warning = FALSE, fig.width=5, fig.height=3}
+
+par(mar = c(4,4,1,4) + 0.1)
+
+matplot((2*1:121), sim.move[, sim.max],
+	type = "l",
+	lwd = 2,
+	col = cols[2],
+#	ylim = c(ylo, yhi),
+	ylim = c(0, 10),
+	xlab = "Time [s]",
+	ylab = expression("Tip movement [bin no.]"),
+	)
+matplot(2*1:121, sim.tip[, sim.max],
+	col = cols[1],
+	lwd = 2,
+	type="l",
+	add = TRUE,
+	ylim = c(0, 10)
+)
+mtext(expression ("Tip Fluorescence [bin no.]"), side=4,line=2, col = cols[1])
+
+par(mar = c(4,4,1,4) + 0.1)
+matplot(sim.tip[, sim.max], sim.move[, sim.max],
+	 pch = 15,
+	 cex = 2.5,
+	 col = "#00CC0025",
+	 ylim = c(0, 10),
+    xlim = c(0, 10),
+    xlab = "Simulated tip fluorescence",
+    ylab = "Simulated tip movement"
+	 )
+
+sim.rho.max <- cor.test(as.numeric(sim.move[, sim.max]), as.numeric(sim.tip[, sim.max]), method = "spearman")$estimate
+legend("topright", paste("Spearman Rho =", signif(sim.rho.max, 2)), bty = "n")
+```
+
+\n
+
+**Fig. 4. Simulated fluorescence and movement in the simulation with the highest correlation between all 10,000 generated simulations. ** 
+
+
+
+```{r, echo = FALSE, fig.height=4, fig.width=4}
+
+hist(sim.rho, breaks = 50,
+	main = "Correlation Rho \nin 10,000 MC Simulations",
+	xlab = "Spearman Rho",
+	ylab = "Frequency",
+	col = "darkgrey",
+	border = "white",
+	xlim = c(-rho.0, (rho.0 + 0.1))
+	)
+abline(v = rho.0,
+	col = "red",
+	lty = 2)
+legend("topleft", paste("max = ", signif(sim.rho.max, 2)), cex = 0.8, bty = "n")	
+legend("topright", "obs = 0.65", cex= 0.8, text.col = "red", bty = "n")	
+```
+
+
+\n 
+**Fig. 5. Histogram of correlation coefficients for all 10,000 simulations.** In the case of this example filopodium, the correlation seen in real data (red line, Rho = 0.65) exceeds the correlation in any of the 10,000 simulations (grey, max Rho = 0.55).
+
+
+*To save a visualisation of each of these simulations, see original markdown script file at this position (not executed here).*
+
+<!-- # ```{r echo = FALSE} -->
+<!-- # for(i in 1:100) { -->
+<!-- # pdf(file = paste0("sim", i, ".pdf"), width = 10, height = 3) -->
+<!-- # 	par(mar = c(4,4,1,4) + 0.1) -->
+<!-- # 	par(mfrow = c(1,2)) -->
+<!-- # matplot((2*1:121), sim.move[, i], -->
+<!-- # 	type = "l", -->
+<!-- # 	lwd = 2, -->
+<!-- # 	col = cols[2], -->
+<!-- # #	ylim = c(ylo, yhi), -->
+<!-- # 	ylim = c(0, 10), -->
+<!-- # 	xlab = "Time [s]", -->
+<!-- # 	ylab = expression("Tip movement [discrete]") -->
+<!-- # 	) -->
+<!-- # matplot(2*1:121, sim.tip[, i], -->
+<!-- # 	col = cols[1], -->
+<!-- # 	lwd = 2, -->
+<!-- # 	type="l", -->
+<!-- # 	add = TRUE, -->
+<!-- # 	ylim = c(0, 10) -->
+<!-- # ) -->
+<!-- # legend("topleft", paste("Simulation", i), bty = "n") -->
+<!-- # mtext(expression ("Tip Fluorescence [disc.]"), side=4,line=2, col = cols[1]) -->
+<!-- # matplot(sim.tip[, i], sim.move[, i], -->
+<!-- # 	 pch = 15, -->
+<!-- # 	 cex = 2.5, -->
+<!-- # 	 col = "#00CC0025", -->
+<!-- # 	 ylim = c(0, 10), -->
+<!-- #     xlim = c(0, 10), -->
+<!-- #     xlab = "Simulated tip fluorescence", -->
+<!-- #     ylab = "Simulated tip movement" -->
+<!-- # 	) -->
+<!-- # legend("topright", paste("Spearman Rho =", signif(sim.rho[i], 2)), bty = "n") -->
+<!-- # dev.off()	 -->
+<!-- # } -->
+<!-- # ``` -->
+
+In conclusion, none of the 10,000 simulations recapitulate the correlations bewteen fluorescence and movement observed in the real measured dataset. The simulations were generated under the assumption that the two modelled quantitites (fluorescence and movement) behave independently of each other. We can thus conclude that in a given filopodium with transition probabilities that match those of the example filopodium, the probability of observed correlation arising by chance is less than 1 in 10,000, i.e. < 0.0001. This can be interpreted as evidence that in the measured example filopodium, fluorescence and movement are not independent of each other (unless the example was chosen as the best example in a very large dataset).
+
+
+### Application to the dataset:
+
+
+In order to apply the above method to a larger dataset encompassing multiple filopodia, each with its own transition probabilities for fluorescence and movement, we need a new function which performs the following tasks for each filopodium given its data on fluorescence and movement: 
+
+Function *SimulateFilo*:
+1. extracts Markov chain transition probabilities for its fluorescence measurements
+2. likewise, extracts Markov chain transition probabilities for its movement measurements
+3. performs a specified number of simulations with these transition probabilities for both fluorescence and movement
+4. for each pair of simulations for fluorescence and movement, calculates a correlation metric (Spearman's Rho)
+5. (output) counts the number of simulations in which the recorded correlation metric is higher than in the measured dataset
+6. (output) calculates the distance (in standard deviation) of the observed Rho in the measured dataset from the population of Rho values from the simulated datasets
+
+*See the associated markdown file for code.*
+
+```{r, echo = FALSE}
+
+FirstNonNA <- function(x) {
+	nonNA.index <- which(!is.na(x))
+	first.nonNA <- min(nonNA.index, na.rm = TRUE)
+	last.nonNA <- max(nonNA.index, na.rm = TRUE)
+	return(first.nonNA)
+}
+LastNonNA <- function(x) {
+	nonNA.index <- which(!is.na(x))
+	last.nonNA <- max(nonNA.index, na.rm = TRUE)
+	return(last.nonNA)
+}
+NonNArange <- function(x) {   	# Doesn't clean up NAs within the time series! (intentionally)
+	FirstNonNA(x):LastNonNA(x)
+	}
+
+
+SimulateFilo <- function(y, x, n.sim = 10, output = "count", ...) {
+	
+	stopifnot(length(x) == length(y))	
+	
+	#----
+	# 1. Prepare required elements and Markov Chain properties:
+
+	y1 <- y[NonNArange(y)]
+	x1 <- x[NonNArange(x)]
+	
+	states.y = c(1:9)
+	states.x = c(1:9) # this will need upgrading to handle NAs too 
+	y.d <- cut(y1, 9, labels = states.y) # 'd' for discrete
+	x.d <- cut(x1, 9, labels = states.x)
+
+	# Solving the NAs problem:
+	
+	if(sum(is.na(y.d)) > 0) {
+		states.y[10] <- NA
+	}
+
+	if(sum(is.na(x.d)) > 0) {
+		states.x[10] <- NA
+	}
+
+	tMatrixY <-  markovchainFit(y.d)$estimate@transitionMatrix
+	tMatrixX  <- markovchainFit(x.d)$estimate@transitionMatrix
+
+	mcY <- new("markovchain", 
+		states = as.character(colnames(tMatrixY)), 
+		byrow = TRUE, 
+		transitionMatrix = tMatrixY,
+		name = "Movement")
+
+	mcX <- new("markovchain", 
+		states = as.character(colnames(tMatrixX)), 
+		byrow = TRUE, 
+		transitionMatrix = tMatrixX,
+		name = "Fluorescence")
+	
+	#----
+	# 2. Generate <n.sim> simulations
+		
+	sim.rho <- c()
+	sim.p <- c()
+	sim.move <- data.frame(matrix(NA, ncol = n.sim, nrow = length(y)-bb))
+	sim.tip  <- data.frame(matrix(NA, ncol = n.sim, nrow = length(x)-bb))
+	
+	orig.rho <- cor.test(as.numeric(y), as.numeric(x), method = "spearman")$estimate
+	orig.p <- cor.test(as.numeric(y), as.numeric(x), method = "spearman")$p.value
+		
+	for (i in 1:n.sim) {
+		
+		move.sim.i <- as.integer(rmarkovchain(121, object = mcY, t0 = y.d[1]))
+		tip.sim.i <- as.integer(rmarkovchain(121, object = mcX, t0 = x.d[1]))	
+	
+		sim.move[, i] <- move.sim.i
+		sim.tip[, i] <- tip.sim.i
+		
+		p.i <- cor.test(as.numeric(move.sim.i), as.numeric(tip.sim.i), 
+				method = "spearman")$p.value
+		rho.i <- cor.test(as.numeric(move.sim.i), as.numeric(tip.sim.i), 
+				method = "spearman")$estimate
+		
+		sim.p[i] <- p.i 
+		sim.rho[i] <- rho.i 
+	}
+	
+	#----
+	# 3. Compare all simulations with orig. x & y
+
+	
+	# 3a. Output how many simulations were as correlated as the original
+	
+	if(output == "count") {
+		z <- Count(which(sim.rho > orig.rho))
+	} else if(output == "SD") {
+	# 3b. output how many SDs away from mean
+		GetSDfromMean <- function(vector, value) {
+			mean <- mean(vector, na.rm = TRUE)
+			sd <- sd(vector, na.rm = TRUE)			
+			z <- (value-mean)/sd
+			z
+		}	
+	z <- GetSDfromMean(sim.rho, orig.rho)
+	}
+	print(z)
+}
+```
+
+
+<!-- ```{r, echo = FALSE, warning = FALSE} -->
+<!-- # Example of use: -->
+
+<!-- SimulateFilo(all.move[, 1], tip.f[, 1], n.sim = 100, output = "SD")	 -->
+<!-- SimulateFilo(all.move[, 1], tip.f[, 1], n.sim = 100, output = "count")	 -->
+
+<!-- # Desired upgrade: the distributions of Rho (and ideally, a record of all the simulations!) -->
+<!-- ```	 -->
+
+
+Looping the above function (*SimulateFilo*) through all filopodia:
+
+```{r, echo = FALSE, warning = FALSE, cache = TRUE}
+simulation.count <- c()	
+for(f in 1:n.filo) {
+	simulation.count[f] <- SimulateFilo(all.move[, f], tip.f[, f], n.sim = 10000, output = "count")
+}
+# 
+# simulation.SDs <- c()
+# for(f in 1:n.filo) {
+# 	simulation.SDs[f] <- SimulateFilo(all.move[, f], tip.f[, f], n.sim = 10000, output = "SD")
+# }
+```
+
+Here is a summary of results for each of the 21 filopodia in our dataset:
+
+```{r, echo = FALSE, warning = FALSE}
+mcresults <- data.frame("Name" = colnames(all.move), 
+                        "Sim.in.10000" = simulation.count, 
+                        "Sim.proportion" = simulation.count/10000
+                        # , "Sim SD" = simulation.SDs
+                      )
+mcresults[order(mcresults$Sim.proportion),]
+```
+
+In conclusion: for four filopodia in the dataset (n = 21, 19%) there is a less than 1 in 10,000 chance (P < 0.0001) that the observed correlation could have arisen by chance, given the transition matrices describing the dynamic behaviour of their tip fluorescence and tip movement. For an additional 3 filopodia (14%; total 7/21, 33%), there is a less than 1 in 1,000 chance (P < 0.001) of the observed correlation between tip fluorescence and movement having occured by chance. This can be interpreted as evidence against the null hypothesis, indicating instead that at least in a third of the filopodia in the measured dataset, there is a positive correlation between their tip fluorescence and tip movement.
+
+ 
